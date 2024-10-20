@@ -125,7 +125,15 @@ open class WebSocket: WebSocketClient, EngineDelegate {
             self.init(request: request, engine: WSEngine(transport: FoundationTransport(), certPinner: certPinner, compressionHandler: compressionHandler))
         }
     }
-    
+
+    deinit {
+        if #available(iOS 13.0, *) {
+            if let engine = engine as? NativeEngine {
+                engine.closeSession()
+            }
+        }
+    }
+
     public func connect() {
         engine.register(delegate: self)
         engine.start(request: request)
