@@ -207,10 +207,6 @@ public class FoundationTransport: NSObject, Transport, StreamDelegate {
                     delegate?.connectionChanged(state: .connected)
                 }
             }
-        case .endEncountered:
-            if aStream == inputStream {
-                delegate?.connectionChanged(state: .cancelled)
-            }
         default:
             break
         }
