@@ -110,8 +110,15 @@ public class TCPTransport: Transport {
             switch newState {
             case .ready:
                 self?.delegate?.connectionChanged(state: .connected)
-            case .waiting:
-                self?.delegate?.connectionChanged(state: .waiting)
+            case let .waiting(error):
+                // Treat a stuck connection (waiting) as failed when the error indicates the
+                // connection will never become ready, so reconnection logic can kick in.
+                if case let .posix(errorCode) = error,
+                   errorCode == .ETIMEDOUT || errorCode == .ENETDOWN || errorCode == .ENETUNREACH {
+                    self?.delegate?.connectionChanged(state: .failed(error))
+                } else {
+                    self?.delegate?.connectionChanged(state: .waiting)
+                }
             case .cancelled:
                 self?.delegate?.connectionChanged(state: .cancelled)
             case .failed(let error):
