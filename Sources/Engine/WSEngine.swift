@@ -122,7 +122,10 @@ FrameCollectorDelegate, HTTPHandlerDelegate {
             
             var isCompressed = false
             var sendData = data
-            if let compressedData = s.compressionHandler?.compress(data: data) {
+            // RFC 7692 §6.1: control frames (close/ping/pong) must never be compressed, and a
+            // peer receiving one with RSV1 set must fail the connection (aiohttp >= 3.14.4 does).
+            if opcode == .textFrame || opcode == .binaryFrame,
+               let compressedData = s.compressionHandler?.compress(data: data) {
                 sendData = compressedData
                 isCompressed = true
             }
