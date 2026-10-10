@@ -63,5 +63,51 @@ class CompressionTests: XCTestCase {
         
         XCTAssert(rawData == uncompressed)
     }
-    
+
+    func testControlFramesAreNotCompressed() {
+        let transport = FrameCapturingTransport()
+        let engine = WSEngine(transport: transport, headerValidator: MockSecurity(), compressionHandler: WSCompression())
+        engine.start(request: URLRequest(url: URL(string: "ws://localhost/ws")!))
+        engine.didReceiveHTTP(event: .success(["Sec-WebSocket-Extensions": "permessage-deflate"]))
+
+        let written = expectation(description: "frames written")
+        written.expectedFulfillmentCount = 4
+        transport.onWrite = { written.fulfill() }
+
+        // The empty pong is what Starscream sends back for a server heartbeat ping.
+        engine.write(data: Data(), opcode: .pong, completion: nil)
+        engine.write(data: "ping".data(using: .utf8)!, opcode: .ping, completion: nil)
+        engine.write(data: Data([0x03, 0xE8]), opcode: .connectionClose, completion: nil)
+        engine.write(string: "Hello, World! Hello, World! Hello, World!", completion: nil)
+        wait(for: [written], timeout: 5)
+
+        let firstBytes = transport.frames.map { $0[0] }
+        XCTAssertEqual(firstBytes[0], FinMask | FrameOpCode.pong.rawValue)
+        XCTAssertEqual(firstBytes[1], FinMask | FrameOpCode.ping.rawValue)
+        XCTAssertEqual(firstBytes[2], FinMask | FrameOpCode.connectionClose.rawValue)
+        // Data frames are still compressed once permessage-deflate is negotiated.
+        XCTAssertEqual(firstBytes[3], FinMask | RSV1Mask | FrameOpCode.textFrame.rawValue)
+    }
+
+}
+
+private class FrameCapturingTransport: Transport {
+    var frames = [Data]()
+    var onWrite: (() -> Void)?
+
+    var usingTLS: Bool {
+        return false
+    }
+
+    func register(delegate: TransportEventClient) {}
+
+    func connect(url: URL, timeout: Double, certificatePinning: CertificatePinning?) {}
+
+    func disconnect() {}
+
+    func write(data: Data, completion: @escaping ((Error?) -> ())) {
+        frames.append(data)
+        completion(nil)
+        onWrite?()
+    }
 }
