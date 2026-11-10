@@ -58,6 +58,12 @@ public class TCPTransport: Transport {
             delegate?.connectionChanged(state: .failed(TCPTransportError.invalidRequest))
             return
         }
+        // Cancel any in-flight connection so a retry (e.g. after .waiting reset isConnecting)
+        // doesn't leak the old one. Detach its handler first so the stale .cancelled event
+        // doesn't reach the delegate while the new connection is starting.
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
         self.isTLS = parts.isTLS
         let options = NWProtocolTCP.Options()
         options.connectionTimeout = Int(timeout.rounded(.up))

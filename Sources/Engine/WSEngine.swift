@@ -147,6 +147,12 @@ FrameCollectorDelegate, HTTPHandlerDelegate {
             let data = httpHandler.convert(request: wsReq)
             transport.write(data: data, completion: {_ in })
         case .waiting:
+            // A connection stuck in .waiting never delivers .connected/.failed, so
+            // isConnecting would stay true forever and block future connect() calls.
+            // Reset it here; connect() remains guarded by TCPTransport's own state.
+            mutex.wait()
+            isConnecting = false
+            mutex.signal()
             break
         case .failed(let error):
             handleError(error)
@@ -171,6 +177,10 @@ FrameCollectorDelegate, HTTPHandlerDelegate {
             
             broadcast(event: .cancelled)
         case .peerClosed:
+            mutex.wait()
+            isConnecting = false
+            mutex.signal()
+
             broadcast(event: .peerClosed)
         }
     }
