@@ -10,6 +10,8 @@ Added:
 - NativeEngine now invalidates its URLSession on reconnect and `WebSocket` deinit, fixing a session-per-reconnect memory leak (based on michaelrevlis/master).
 
 Fixed:
+- NativeEngine no longer broadcasts a phantom `.error(nil)` after every normal shutdown: didCompleteWithError now maps to silence (after a close handshake), `.cancelled` (client-requested stop), `.peerClosed` (server dropped without a close frame), or `.error` (real failures only).
+- `certPinner` passed to the WebSocket convenience init now applies when `useCustomEngine` is false, via NativeEngine's server-trust challenge handling (previously silently dropped — pinned connections would succeed under default trust evaluation).
 - WSEngine no longer compresses control frames (close/ping/pong), per RFC 7692 §6.1 (based on bgoncal/master).
 - TCPTransport treats a `.waiting` connection with ETIMEDOUT/ENETDOWN/ENETUNREACH as failed so reconnection logic can engage (based on woosiki/fix_reconnection, lexiaoyao20/master).
 - WSEngine resets `isConnecting` when a connection is stuck `.waiting` or the peer closes, unblocking future `connect()` calls; TCPTransport.connect() now cancels any in-flight connection instead of leaking it (based on yoheimuta/fix-isConnecting-flag-struck).
