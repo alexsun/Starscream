@@ -147,7 +147,11 @@ open class WebSocket: WebSocketClient, EngineDelegate {
     
     public convenience init(request: URLRequest, certPinner: CertificatePinning? = FoundationSecurity(), compressionHandler: CompressionHandler? = nil, useCustomEngine: Bool = true) {
         if #available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *), !useCustomEngine {
-            self.init(request: request, engine: NativeEngine())
+            let engine = NativeEngine()
+            // Wire pinning into the URLSession server-trust challenge; without this the
+            // pinner is silently dropped and a pinned connection would still succeed.
+            engine.certificatePinner = certPinner
+            self.init(request: request, engine: engine)
         } else if #available(macOS 10.14, iOS 12.0, watchOS 5.0, tvOS 12.0, *) {
             self.init(request: request, engine: WSEngine(transport: TCPTransport(), certPinner: certPinner, compressionHandler: compressionHandler))
         } else {
