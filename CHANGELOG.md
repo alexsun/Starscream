@@ -2,6 +2,24 @@
 All notable changes to this project will be documented in this file.
 `Starscream` adheres to [Semantic Versioning](http://semver.org/).
 
+### Unreleased
+
+Added:
+- NativeEngine now broadcasts `.pong` events when a pong arrives for a ping sent via `write(ping:)`. The echoed payload is the request-side payload (URLSessionWebSocketTask cannot carry ping payloads on the wire). Note: server-initiated pings are answered automatically by URLSession and never surface as `.ping` events; pong timeouts remain the caller's responsibility.
+- New additive write APIs that surface write errors instead of dropping them: `write(..., reportingError:)` on `WebSocket`/`WebSocketClient` and `Engine`. Nil error means the frame was handed off successfully. Defaulted protocol requirements, so existing callers and custom conformers are unaffected.
+- NativeEngine now invalidates its URLSession on reconnect and `WebSocket` deinit, fixing a session-per-reconnect memory leak (based on michaelrevlis/master).
+
+Fixed:
+- WSEngine no longer compresses control frames (close/ping/pong), per RFC 7692 §6.1 (based on bgoncal/master).
+- TCPTransport treats a `.waiting` connection with ETIMEDOUT/ENETDOWN/ENETUNREACH as failed so reconnection logic can engage (based on woosiki/fix_reconnection, lexiaoyao20/master).
+- WSEngine resets `isConnecting` when a connection is stuck `.waiting` or the peer closes, unblocking future `connect()` calls; TCPTransport.connect() now cancels any in-flight connection instead of leaking it (based on yoheimuta/fix-isConnecting-flag-struck).
+- FoundationTransport.disconnect() no longer risks a use-after-free crash from queued CFStream callbacks (based on bgoncal/master).
+- Legacy completion-based writes on a disconnected engine now invoke the completion instead of silently dropping it.
+- Removed duplicated `.endEncountered` case in FoundationTransport (based on yanamura/remove-duplicated-case).
+
+Dependencies:
+- Bumped rexml to 3.2.8 in Gemfile.lock (rezk8968-ctrl/dependabot).
+
 ### [4.0.4](https://github.com/daltoniam/Starscream/tree/4.0.4)
 
 Bug fixes for 4.0.3.
