@@ -23,9 +23,23 @@
 import Foundation
 
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
+/// Engine backed by URLSessionWebSocketTask.
+///
+/// URLSession-level limits compared to WSEngine, by design of URLSessionWebSocketTask:
+/// - Pings sent here carry no payload on the wire; `.pong` events echo the request-side
+///   payload back. Server-initiated pings are answered automatically by URLSession and are
+///   never surfaced as `.ping` events (so respondToPingWithPong does not apply here).
+/// - A pong that never arrives does not time out on its own; the failure only surfaces
+///   through the write/ping completion. Callers implement their own pong timeout.
 public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionWebSocketDelegate {
     private var task: URLSessionWebSocketTask?
     private var session: URLSession?
+    // Payloads of pings sent through write(data:opcode:completion:), oldest first. RFC 6455
+    // guarantees pongs are returned in order, so the oldest payload matches the next pong.
+    // Empty when the ping carried no payload; URLSessionWebSocketTask cannot echo a pong
+    // payload back (its sendPing only sends empty pings), so the broadcast reuses the
+    // request-side payload.
+    private var pendingPingPayloads = [Data]()
     weak var delegate: EngineDelegate?
 
     public func register(delegate: EngineDelegate) {
@@ -36,6 +50,7 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
         // URLSession retains its delegate (this engine) until invalidation. Tear down any
         // session left over from a previous run, or each reconnect would leak one session.
         closeSession()
+        pendingPingPayloads.removeAll()
         session = URLSession(configuration: URLSessionConfiguration.default, delegate: self, delegateQueue: nil)
         task = session?.webSocketTask(with: request)
         doRead()
@@ -94,7 +109,25 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
             }
             write(string: text, reportingError: onError)
         case .ping:
-            task?.sendPing(pongReceiveHandler: { (error) in
+            // URLSessionWebSocketTask.sendPing cannot carry a payload, so the pong the peer
+            // returns is empty on the wire. The broadcast below reuses the request-side
+            // payload so callers get the data they asked to ping with, matching WSEngine's
+            // behavior of echoing the real pong payload. Callers keying on payload contents
+            // should know this is request-side data, not what the peer actually sent back.
+            pendingPingPayloads.append(data)
+            task?.sendPing(pongReceiveHandler: { [weak self] (error) in
+                guard let self = self else { return }
+                // The callback runs on URLSession's internal queue; delegate delivery is the
+                // caller's concern (WebSocket hops to callbackQueue anyway).
+                let payload = self.nextPendingPingPayload()
+                if error == nil {
+                    // Only report a pong when one actually arrived; on error the connection
+                    // is failing and the error below is the meaningful signal. Broadcasts
+                    // before surfacing the error so observers see pong, then failure.
+                    if let payload = payload {
+                        self.broadcast(event: .pong(payload))
+                    }
+                }
                 onError?(error)
             })
         default:
@@ -103,6 +136,15 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
     }
 
     private static let notConnectedError = WSError(type: .protocolError, message: "can't write, not connected", code: CloseCode.noStatusReceived.rawValue)
+
+    // Pops the payload matching the pong that just arrived (FIFO). Returns nil when the
+    // queue is empty, e.g. a sendPing issued outside this API — in that case no .pong is
+    // broadcast because there is no payload to echo. Note the payload count can drift
+    // from in-flight pings if a pong never arrives (dead connection); start() clears it.
+    private func nextPendingPingPayload() -> Data? {
+        guard !pendingPingPayloads.isEmpty else { return nil }
+        return pendingPingPayloads.removeFirst()
+    }
 
     private func doRead() {
         task?.receive { [weak self] (result) in

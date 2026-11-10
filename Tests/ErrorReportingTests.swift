@@ -63,4 +63,19 @@ class ErrorReportingTests: XCTestCase {
             wait(for: [expectation], timeout: 5)
         }
     }
+
+    // A ping on a disconnected NativeEngine reports the error through the completion path
+    // (the offline-verifiable half of the pong broadcast behavior; the pong itself needs a
+    // live server and is covered by manual regression).
+    func testNativeEnginePingOnDisconnectedReportsError() {
+        if #available(macOS 10.15, iOS 13.0, *) {
+            let engine = NativeEngine()
+            let expectation = self.expectation(description: "ping error reported")
+            engine.write(data: Data([1, 2, 3]), opcode: .ping, reportingError: { error in
+                XCTAssertNotNil(error, "pinging a closed engine should report an error")
+                expectation.fulfill()
+            })
+            wait(for: [expectation], timeout: 5)
+        }
+    }
 }
