@@ -40,6 +40,16 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
     // payload back (its sendPing only sends empty pings), so the broadcast reuses the
     // request-side payload.
     private var pendingPingPayloads = [Data]()
+    // didCloseWith already delivered the terminal .disconnected event; didCompleteWithError
+    // fires afterwards for every shutdown (even with a nil error) and must not stack a
+    // second terminal event on top of it.
+    private var didReceiveClose = false
+    // stop()/forceStop() were called by the client; the resulting NSURLErrorCancelled or
+    // nil-error completion is our own doing, not a failure to report.
+    private var stopRequested = false
+    // Optional certificate pinning for the server-trust challenge. When nil, URLSession's
+    // default handling applies (system trust evaluation).
+    public var certificatePinner: CertificatePinning?
     weak var delegate: EngineDelegate?
 
     public func register(delegate: EngineDelegate) {
@@ -51,6 +61,8 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
         // session left over from a previous run, or each reconnect would leak one session.
         closeSession()
         pendingPingPayloads.removeAll()
+        didReceiveClose = false
+        stopRequested = false
         session = URLSession(configuration: URLSessionConfiguration.default, delegate: self, delegateQueue: nil)
         task = session?.webSocketTask(with: request)
         doRead()
@@ -65,6 +77,7 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
 
     public func stop(closeCode: UInt16) {
         let closeCode = URLSessionWebSocketTask.CloseCode(rawValue: Int(closeCode)) ?? .normalClosure
+        stopRequested = true
         task?.cancel(with: closeCode, reason: nil)
     }
 
@@ -177,14 +190,57 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
     }
     
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        didReceiveClose = true
         var r = ""
         if let d = reason {
             r = String(data: d, encoding: .utf8) ?? ""
         }
         broadcast(event: .disconnected(r, UInt16(closeCode.rawValue)))
     }
-    
+
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        broadcast(event: .error(error))
+        // didCompleteWithError closes out every task, including clean ones. Map the four
+        // possible shapes onto the events callers actually need:
+        // - clean close handshake already delivered .disconnected: nothing left to say
+        // - client-requested cancel (stop()/forceStop()) without a close handshake: .cancelled
+        // - server went away without a close frame (nil error): .peerClosed, never .error(nil)
+        // - everything else: a real transport error
+        if didReceiveClose {
+            return
+        }
+        if let error = error {
+            let cancelled = (error as NSError).code == NSURLErrorCancelled
+                && (error as NSError).domain == NSURLErrorDomain
+            if cancelled {
+                broadcast(event: .cancelled)
+            } else {
+                broadcast(event: .error(error))
+            }
+        } else {
+            broadcast(event: .peerClosed)
+        }
+    }
+
+    // MARK: - URLSession authentication
+
+    public func urlSession(_ session: URLSession,
+                           didReceive challenge: URLAuthenticationChallenge,
+                           completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust,
+              let pinner = certificatePinner else {
+            // No custom pinning requested (or not a server-trust challenge): let the system
+            // trust evaluation decide.
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        pinner.evaluateTrust(trust: trust, domain: challenge.protectionSpace.host, completion: { state in
+            switch state {
+            case .success:
+                completionHandler(.useCredential, URLCredential(trust: trust))
+            case .failed:
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
+        })
     }
 }

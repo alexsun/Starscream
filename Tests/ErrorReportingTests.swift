@@ -78,4 +78,109 @@ class ErrorReportingTests: XCTestCase {
             wait(for: [expectation], timeout: 5)
         }
     }
+
+    // MARK: - didCompleteWithError event mapping
+
+    // The four shapes didCompleteWithError can take, and the event each must map to.
+
+    // Records events so tests can inspect what the engine broadcast.
+    private final class EventRecorder: EngineDelegate {
+        private let lock = NSLock()
+        private var events = [WebSocketEvent]()
+
+        var recorded: [WebSocketEvent] {
+            lock.lock(); defer { lock.unlock() }
+            return events
+        }
+
+        func didReceive(event: WebSocketEvent) {
+            lock.lock()
+            events.append(event)
+            lock.unlock()
+        }
+    }
+
+    private func makeEngineWithRecorder() -> (NativeEngine, EventRecorder) {
+        let engine = NativeEngine()
+        let recorder = EventRecorder()
+        engine.register(delegate: recorder)
+        return (engine, recorder)
+    }
+
+    // A dummy task for driving the delegate callbacks directly; the engine does not
+    // check task identity, only its own shutdown bookkeeping.
+    private func makeDummyTask() -> URLSessionWebSocketTask {
+        let session = URLSession(configuration: .default)
+        let task = session.webSocketTask(with: URL(string: "ws://localhost:1")!)
+        return task
+    }
+
+    // A clean close handshake already delivered .disconnected; the trailing completion
+    // (even with a nil error) must not stack a second terminal event on top of it.
+    func testDidCompleteNilErrorAfterCloseHandshakeIsSilent() {
+        let (engine, recorder) = makeEngineWithRecorder()
+        engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
+        let task = makeDummyTask()
+
+        engine.urlSession(URLSession(), webSocketTask: task, didCloseWith: .normalClosure, reason: nil)
+        engine.urlSession(URLSession(), task: task, didCompleteWithError: nil)
+
+        let events = recorder.recorded
+        XCTAssertEqual(events.count, 1)
+        if case .disconnected = events[0] {} else {
+            XCTFail("expected only .disconnected, got \(events)")
+        }
+    }
+
+    // Client-requested cancel (stop()) without a completed close handshake maps to
+    // .cancelled, not .error(NSURLErrorCancelled).
+    func testDidCompleteCancelledAfterStopMapsToCancelled() {
+        let (engine, recorder) = makeEngineWithRecorder()
+        engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
+        engine.stop(closeCode: 1000)
+
+        let task = makeDummyTask()
+        let cancelError = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled, userInfo: nil)
+        engine.urlSession(URLSession(), task: task, didCompleteWithError: cancelError)
+
+        let events = recorder.recorded
+        XCTAssertEqual(events.count, 1)
+        if case .cancelled = events[0] {} else {
+            XCTFail("expected .cancelled, got \(events[0])")
+        }
+    }
+
+    // The server went away without a close frame: nil error maps to .peerClosed, never
+    // .error(nil) — callers must always get a terminal event they can act on.
+    func testDidCompleteNilErrorWithoutCloseMapsToPeerClosed() {
+        let (engine, recorder) = makeEngineWithRecorder()
+        engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
+
+        let task = makeDummyTask()
+        engine.urlSession(URLSession(), task: task, didCompleteWithError: nil)
+
+        let events = recorder.recorded
+        XCTAssertEqual(events.count, 1)
+        if case .peerClosed = events[0] {} else {
+            XCTFail("expected .peerClosed, got \(events[0])")
+        }
+    }
+
+    // A real transport failure still surfaces as .error.
+    func testDidCompleteRealErrorMapsToError() {
+        let (engine, recorder) = makeEngineWithRecorder()
+        engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
+
+        let task = makeDummyTask()
+        let realError = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, userInfo: nil)
+        engine.urlSession(URLSession(), task: task, didCompleteWithError: realError)
+
+        let events = recorder.recorded
+        XCTAssertEqual(events.count, 1)
+        if case .error(let error) = events[0] {
+            XCTAssertEqual((error as NSError?)?.code, NSURLErrorTimedOut)
+        } else {
+            XCTFail("expected .error, got \(events[0])")
+        }
+    }
 }
