@@ -109,17 +109,31 @@ FrameCollectorDelegate, HTTPHandlerDelegate {
         let data = string.data(using: .utf8)!
         write(data: data, opcode: .textFrame, completion: completion)
     }
-    
+
+    public func write(string: String, reportingError onError: ((Error?) -> ())?) {
+        let data = string.data(using: .utf8)!
+        write(data: data, opcode: .textFrame, reportingError: onError)
+    }
+
     public func write(data: Data, opcode: FrameOpCode, completion: (() -> ())?) {
+        write(data: data, opcode: opcode, reportingError: { _ in completion?() })
+    }
+
+    public func write(data: Data, opcode: FrameOpCode, reportingError onError: ((Error?) -> ())?) {
         writeQueue.async { [weak self] in
-            guard let s = self else { return }
+            guard let s = self else {
+                onError?(nil)
+                return
+            }
             s.mutex.wait()
             let canWrite = s.canSend
             s.mutex.signal()
             if !canWrite {
+                // Not connected: nothing was written, so report it as a failure.
+                onError?(WSError(type: .protocolError, message: "can't write, not connected", code: CloseCode.noStatusReceived.rawValue))
                 return
             }
-            
+
             var isCompressed = false
             var sendData = data
             // RFC 7692 §6.1: control frames (close/ping/pong) must never be compressed, and a
@@ -129,10 +143,10 @@ FrameCollectorDelegate, HTTPHandlerDelegate {
                 sendData = compressedData
                 isCompressed = true
             }
-            
+
             let frameData = s.framer.createWriteFrame(opcode: opcode, payload: sendData, isCompressed: isCompressed)
-            s.transport.write(data: frameData, completion: {_ in
-                completion?()
+            s.transport.write(data: frameData, completion: { error in
+                onError?(error)
             })
         }
     }

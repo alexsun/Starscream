@@ -49,10 +49,39 @@ public protocol WebSocketClient: AnyObject {
     func write(data: Data, completion: (() -> ())?)
     func write(ping: Data, completion: (() -> ())?)
     func write(pong: Data, completion: (() -> ())?)
+
+    /// Writes with write errors reported through the callback instead of being dropped.
+    /// A nil error means the frame was handed off successfully. Defaulted so conformers
+    /// that only implement the completion-based writes keep compiling.
+    func write(string: String, reportingError: ((Error?) -> ())?)
+    func write(stringData: Data, reportingError: ((Error?) -> ())?)
+    func write(data: Data, reportingError: ((Error?) -> ())?)
+    func write(ping: Data, reportingError: ((Error?) -> ())?)
+    func write(pong: Data, reportingError: ((Error?) -> ())?)
 }
 
 //implements some of the base behaviors
 extension WebSocketClient {
+    public func write(string: String, reportingError: ((Error?) -> ())?) {
+        write(string: string, completion: { reportingError?(nil) })
+    }
+
+    public func write(stringData: Data, reportingError: ((Error?) -> ())?) {
+        write(stringData: stringData, completion: { reportingError?(nil) })
+    }
+
+    public func write(data: Data, reportingError: ((Error?) -> ())?) {
+        write(data: data, completion: { reportingError?(nil) })
+    }
+
+    public func write(ping: Data, reportingError: ((Error?) -> ())?) {
+        write(ping: ping, completion: { reportingError?(nil) })
+    }
+
+    public func write(pong: Data, reportingError: ((Error?) -> ())?) {
+        write(pong: pong, completion: { reportingError?(nil) })
+    }
+
     public func write(string: String) {
         write(string: string, completion: nil)
     }
@@ -162,13 +191,41 @@ open class WebSocket: WebSocketClient, EngineDelegate {
     public func write(ping: Data, completion: (() -> ())?) {
         write(data: ping, opcode: .ping, completion: completion)
     }
-    
+
     public func write(pong: Data, completion: (() -> ())?) {
         write(data: pong, opcode: .pong, completion: completion)
     }
-    
+
+    public func write(string: String, reportingError: ((Error?) -> ())?) {
+        engine.write(string: string, reportingError: reportingError)
+    }
+
+    public func write(stringData: Data, reportingError: ((Error?) -> ())?) {
+        write(stringData: stringData, opcode: .textFrame, reportingError: reportingError)
+    }
+
+    public func write(data: Data, reportingError: ((Error?) -> ())?) {
+        write(data: data, opcode: .binaryFrame, reportingError: reportingError)
+    }
+
+    public func write(ping: Data, reportingError: ((Error?) -> ())?) {
+        write(data: ping, opcode: .ping, reportingError: reportingError)
+    }
+
+    public func write(pong: Data, reportingError: ((Error?) -> ())?) {
+        write(data: pong, opcode: .pong, reportingError: reportingError)
+    }
+
     private func write(data: Data, opcode: FrameOpCode, completion: (() -> ())?) {
         engine.write(data: data, opcode: opcode, completion: completion)
+    }
+
+    private func write(data: Data, opcode: FrameOpCode, reportingError: ((Error?) -> ())?) {
+        engine.write(data: data, opcode: opcode, reportingError: reportingError)
+    }
+
+    private func write(stringData: Data, opcode: FrameOpCode, reportingError: ((Error?) -> ())?) {
+        engine.write(data: stringData, opcode: opcode, reportingError: reportingError)
     }
     
     // MARK: - EngineDelegate

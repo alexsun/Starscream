@@ -63,23 +63,46 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
         })
     }
 
+    public func write(string: String, reportingError onError: ((Error?) -> ())?) {
+        guard let task = task else {
+            onError?(NativeEngine.notConnectedError)
+            return
+        }
+        task.send(.string(string), completionHandler: { (error) in
+            onError?(error)
+        })
+    }
+
     public func write(data: Data, opcode: FrameOpCode, completion: (() -> ())?) {
+        write(data: data, opcode: opcode, reportingError: { _ in completion?() })
+    }
+
+    public func write(data: Data, opcode: FrameOpCode, reportingError onError: ((Error?) -> ())?) {
+        guard task != nil else {
+            onError?(NativeEngine.notConnectedError)
+            return
+        }
         switch opcode {
         case .binaryFrame:
             task?.send(.data(data), completionHandler: { (error) in
-                completion?()
+                onError?(error)
             })
         case .textFrame:
-            let text = String(data: data, encoding: .utf8)!
-            write(string: text, completion: completion)
+            guard let text = String(data: data, encoding: .utf8) else {
+                onError?(WSError(type: .protocolError, message: "text frames must contain valid UTF-8", code: CloseCode.encoding.rawValue))
+                return
+            }
+            write(string: text, reportingError: onError)
         case .ping:
             task?.sendPing(pongReceiveHandler: { (error) in
-                completion?()
+                onError?(error)
             })
         default:
             break //unsupported
         }
     }
+
+    private static let notConnectedError = WSError(type: .protocolError, message: "can't write, not connected", code: CloseCode.noStatusReceived.rawValue)
 
     private func doRead() {
         task?.receive { [weak self] (result) in

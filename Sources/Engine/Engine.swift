@@ -26,11 +26,28 @@ public protocol EngineDelegate: AnyObject {
     func didReceive(event: WebSocketEvent)
 }
 
-public protocol Engine {
+public protocol Engine: AnyObject {
     func register(delegate: EngineDelegate)
     func start(request: URLRequest)
     func stop(closeCode: UInt16)
     func forceStop()
     func write(data: Data, opcode: FrameOpCode, completion: (() -> ())?)
     func write(string: String, completion: (() -> ())?)
+
+    /// Writes with write errors reported through the completion instead of being dropped.
+    ///
+    /// Engines that cannot surface a write error still invoke the callback with nil.
+    /// Defaulted so custom engines keep compiling; conformers are encouraged to override.
+    func write(data: Data, opcode: FrameOpCode, reportingError onError: ((Error?) -> ())?)
+    func write(string: String, reportingError onError: ((Error?) -> ())?)
+}
+
+public extension Engine {
+    func write(data: Data, opcode: FrameOpCode, reportingError onError: ((Error?) -> ())?) {
+        write(data: data, opcode: opcode, completion: { onError?(nil) })
+    }
+
+    func write(string: String, reportingError onError: ((Error?) -> ())?) {
+        write(string: string, completion: { onError?(nil) })
+    }
 }
