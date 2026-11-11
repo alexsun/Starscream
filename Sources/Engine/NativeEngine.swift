@@ -187,8 +187,11 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
                     break
                 }
                 break
-            case .failure(let error):
-                self?.broadcast(event: .error(error))
+            case .failure:
+                // Do not broadcast here. URLSession guarantees didCompleteWithError fires
+                // when the task ends, so that callback (with its close/stop/pinning/
+                // peerClosed mapping) is the single terminal exit; broadcasting .error
+                // here too would double-report clean closes and race the terminal mapping.
                 return
             }
             self?.doRead()
