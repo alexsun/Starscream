@@ -6,8 +6,12 @@ All notable changes to this project will be documented in this file.
 
 Added:
 - NativeEngine now broadcasts `.pong` events when a pong arrives for a ping sent via `write(ping:)`. The echoed payload is the request-side payload (URLSessionWebSocketTask cannot carry ping payloads on the wire). Note: server-initiated pings are answered automatically by URLSession and never surface as `.ping` events; pong timeouts remain the caller's responsibility.
-- New additive write APIs that surface write errors instead of dropping them: `write(..., reportingError:)` on `WebSocket`/`WebSocketClient` and `Engine`. Nil error means the frame was handed off successfully. Defaulted protocol requirements, so existing callers and custom conformers are unaffected.
+- New additive write APIs that surface write errors instead of dropping them: `write(..., reportingError:)` on `WebSocket`/`WebSocketClient` and `Engine`. Engines that cannot surface a write error invoke the callback with nil. Defaulted protocol requirements, so existing callers and custom conformers are unaffected.
 - NativeEngine now invalidates its URLSession on reconnect and `WebSocket` deinit, fixing a session-per-reconnect memory leak (based on michaelrevlis/master).
+
+Behavior notes:
+- The legacy completion-based writes now fire their completion on a disconnected engine (previously NativeEngine never invoked it when its task was nil). Callers that treat "completion called" as "write succeeded" must switch to `write(..., reportingError:)` or check the connection state.
+- A certificate-pinning rejection on NativeEngine now surfaces as `.error` (WSError, securityError/pinningFailed) instead of a bare `.cancelled`.
 
 Fixed:
 - NativeEngine no longer broadcasts a phantom `.error(nil)` after every normal shutdown: didCompleteWithError now maps to silence (after a close handshake), `.cancelled` (client-requested stop), `.peerClosed` (server dropped without a close frame), or `.error` (real failures only).
@@ -16,8 +20,7 @@ Fixed:
 - TCPTransport treats a `.waiting` connection with ETIMEDOUT/ENETDOWN/ENETUNREACH as failed so reconnection logic can engage (based on woosiki/fix_reconnection, lexiaoyao20/master).
 - WSEngine resets `isConnecting` when a connection is stuck `.waiting` or the peer closes, unblocking future `connect()` calls; TCPTransport.connect() now cancels any in-flight connection instead of leaking it (based on yoheimuta/fix-isConnecting-flag-struck).
 - FoundationTransport.disconnect() no longer risks a use-after-free crash from queued CFStream callbacks (based on bgoncal/master).
-- Legacy completion-based writes on a disconnected engine now invoke the completion instead of silently dropping it.
-- Removed duplicated `.endEncountered` case in FoundationTransport (based on yanamura/remove-duplicated-case).
+- Legacy completion-based writes on a disconnected engine now invoke the completion instead of silently dropping it (see behavior notes).
 
 Dependencies:
 - Bumped rexml to 3.2.8 in Gemfile.lock (rezk8968-ctrl/dependabot).

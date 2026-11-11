@@ -51,8 +51,8 @@ public protocol WebSocketClient: AnyObject {
     func write(pong: Data, completion: (() -> ())?)
 
     /// Writes with write errors reported through the callback instead of being dropped.
-    /// A nil error means the frame was handed off successfully. Defaulted so conformers
-    /// that only implement the completion-based writes keep compiling.
+    /// Engines that cannot surface a write error invoke the callback with nil. Defaulted
+    /// so conformers that only implement the completion-based writes keep compiling.
     func write(string: String, reportingError: ((Error?) -> ())?)
     func write(stringData: Data, reportingError: ((Error?) -> ())?)
     func write(data: Data, reportingError: ((Error?) -> ())?)

@@ -122,7 +122,6 @@ public class FoundationTransport: NSObject, Transport, StreamDelegate {
         workQueue.async {
             capturedInput?.delegate = nil
             capturedOutput?.delegate = nil
-            _ = (capturedInput, capturedOutput)
         }
     }
     
