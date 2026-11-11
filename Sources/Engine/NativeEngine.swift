@@ -32,7 +32,8 @@ import Foundation
 /// - A pong that never arrives does not time out on its own; the failure only surfaces
 ///   through the write/ping completion. Callers implement their own pong timeout.
 public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionWebSocketDelegate {
-    private var task: URLSessionWebSocketTask?
+    // Internal (not private) so tests can drive the delegate callbacks with the live task.
+    var task: URLSessionWebSocketTask?
     private var session: URLSession?
     // Payloads of pings sent through write(data:opcode:completion:), oldest first. RFC 6455
     // guarantees pongs are returned in order, so the oldest payload matches the next pong.
@@ -40,13 +41,20 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
     // payload back (its sendPing only sends empty pings), so the broadcast reuses the
     // request-side payload.
     private var pendingPingPayloads = [Data]()
+    // Guards pendingPingPayloads: appended on the caller's thread (write(.ping)), popped
+    // on URLSession's internal queue (pongReceiveHandler), cleared in start().
+    private let pingPayloadsLock = NSLock()
     // didCloseWith already delivered the terminal .disconnected event; didCompleteWithError
     // fires afterwards for every shutdown (even with a nil error) and must not stack a
     // second terminal event on top of it.
     private var didReceiveClose = false
-    // stop()/forceStop() were called by the client; the resulting NSURLErrorCancelled or
-    // nil-error completion is our own doing, not a failure to report.
+    // stop()/forceStop() were called by the client; the resulting completion is our own
+    // doing (.cancelled), not a failure. Notably NSURLErrorCancelled WITHOUT this flag is
+    // not a user stop — e.g. a rejected certificate-pinning challenge surfaces that way.
     private var stopRequested = false
+    // The server-trust challenge was rejected by the certificate pinner; used to report
+    // the ensuing cancellation as a security error instead of a bare cancellation.
+    private var pinningRejected = false
     // Optional certificate pinning for the server-trust challenge. When nil, URLSession's
     // default handling applies (system trust evaluation).
     public var certificatePinner: CertificatePinning?
@@ -60,9 +68,12 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
         // URLSession retains its delegate (this engine) until invalidation. Tear down any
         // session left over from a previous run, or each reconnect would leak one session.
         closeSession()
+        pingPayloadsLock.lock()
         pendingPingPayloads.removeAll()
+        pingPayloadsLock.unlock()
         didReceiveClose = false
         stopRequested = false
+        pinningRejected = false
         session = URLSession(configuration: URLSessionConfiguration.default, delegate: self, delegateQueue: nil)
         task = session?.webSocketTask(with: request)
         doRead()
@@ -127,7 +138,9 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
             // payload so callers get the data they asked to ping with, matching WSEngine's
             // behavior of echoing the real pong payload. Callers keying on payload contents
             // should know this is request-side data, not what the peer actually sent back.
+            pingPayloadsLock.lock()
             pendingPingPayloads.append(data)
+            pingPayloadsLock.unlock()
             task?.sendPing(pongReceiveHandler: { [weak self] (error) in
                 guard let self = self else { return }
                 // The callback runs on URLSession's internal queue; delegate delivery is the
@@ -155,6 +168,8 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
     // broadcast because there is no payload to echo. Note the payload count can drift
     // from in-flight pings if a pong never arrives (dead connection); start() clears it.
     private func nextPendingPingPayload() -> Data? {
+        pingPayloadsLock.lock()
+        defer { pingPayloadsLock.unlock() }
         guard !pendingPingPayloads.isEmpty else { return nil }
         return pendingPingPayloads.removeFirst()
     }
@@ -185,11 +200,13 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
     }
     
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        guard webSocketTask === task else { return }
         let p = `protocol` ?? ""
         broadcast(event: .connected([HTTPWSHeader.protocolName: p]))
     }
-    
+
     public func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        guard webSocketTask === task else { return }
         didReceiveClose = true
         var r = ""
         if let d = reason {
@@ -198,21 +215,36 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
         broadcast(event: .disconnected(r, UInt16(closeCode.rawValue)))
     }
 
-    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        // didCompleteWithError closes out every task, including clean ones. Map the four
-        // possible shapes onto the events callers actually need:
+    public func urlSession(_ session: URLSession, task completedTask: URLSessionTask, didCompleteWithError error: Error?) {
+        // A stale completion from a task replaced by a newer start() must not poison the
+        // current connection's event stream.
+        guard completedTask === task else { return }
+        // didCompleteWithError closes out every task, including clean ones. Map the possible
+        // shapes onto the events callers actually need:
         // - clean close handshake already delivered .disconnected: nothing left to say
-        // - client-requested cancel (stop()/forceStop()) without a close handshake: .cancelled
+        // - client-requested stop()/forceStop(): .cancelled regardless of the arrival shape
+        // - a cancellation we did not request (e.g. pinning rejected the challenge): .error
+        //   (as a security error when we know pinning caused it)
         // - server went away without a close frame (nil error): .peerClosed, never .error(nil)
         // - everything else: a real transport error
         if didReceiveClose {
+            return
+        }
+        if stopRequested {
+            broadcast(event: .cancelled)
             return
         }
         if let error = error {
             let cancelled = (error as NSError).code == NSURLErrorCancelled
                 && (error as NSError).domain == NSURLErrorDomain
             if cancelled {
-                broadcast(event: .cancelled)
+                if pinningRejected {
+                    broadcast(event: .error(WSError(type: .securityError, message: "certificate pinning failed", code: SecurityErrorCode.pinningFailed.rawValue)))
+                } else {
+                    // An unrequested cancellation (connection replaced, system teardown)
+                    // is a failure from the caller's point of view.
+                    broadcast(event: .error(error))
+                }
             } else {
                 broadcast(event: .error(error))
             }
@@ -234,11 +266,12 @@ public class NativeEngine: NSObject, Engine, URLSessionDataDelegate, URLSessionW
             completionHandler(.performDefaultHandling, nil)
             return
         }
-        pinner.evaluateTrust(trust: trust, domain: challenge.protectionSpace.host, completion: { state in
+        pinner.evaluateTrust(trust: trust, domain: challenge.protectionSpace.host, completion: { [weak self] state in
             switch state {
             case .success:
                 completionHandler(.useCredential, URLCredential(trust: trust))
             case .failed:
+                self?.pinningRejected = true
                 completionHandler(.cancelAuthenticationChallenge, nil)
             }
         })

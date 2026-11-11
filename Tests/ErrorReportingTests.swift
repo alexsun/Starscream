@@ -107,20 +107,14 @@ class ErrorReportingTests: XCTestCase {
         return (engine, recorder)
     }
 
-    // A dummy task for driving the delegate callbacks directly; the engine does not
-    // check task identity, only its own shutdown bookkeeping.
-    private func makeDummyTask() -> URLSessionWebSocketTask {
-        let session = URLSession(configuration: .default)
-        let task = session.webSocketTask(with: URL(string: "ws://localhost:1")!)
-        return task
-    }
 
     // A clean close handshake already delivered .disconnected; the trailing completion
     // (even with a nil error) must not stack a second terminal event on top of it.
     func testDidCompleteNilErrorAfterCloseHandshakeIsSilent() {
         let (engine, recorder) = makeEngineWithRecorder()
         engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
-        let task = makeDummyTask()
+        // The delegate callbacks only accept the engine's live task (identity guard).
+        guard let task = engine.task else { return XCTFail("engine should hold a task after start") }
 
         engine.urlSession(URLSession(), webSocketTask: task, didCloseWith: .normalClosure, reason: nil)
         engine.urlSession(URLSession(), task: task, didCompleteWithError: nil)
@@ -139,7 +133,7 @@ class ErrorReportingTests: XCTestCase {
         engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
         engine.stop(closeCode: 1000)
 
-        let task = makeDummyTask()
+        guard let task = engine.task else { return XCTFail("engine should hold a task after start") }
         let cancelError = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled, userInfo: nil)
         engine.urlSession(URLSession(), task: task, didCompleteWithError: cancelError)
 
@@ -156,7 +150,7 @@ class ErrorReportingTests: XCTestCase {
         let (engine, recorder) = makeEngineWithRecorder()
         engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
 
-        let task = makeDummyTask()
+        guard let task = engine.task else { return XCTFail("engine should hold a task after start") }
         engine.urlSession(URLSession(), task: task, didCompleteWithError: nil)
 
         let events = recorder.recorded
@@ -171,7 +165,7 @@ class ErrorReportingTests: XCTestCase {
         let (engine, recorder) = makeEngineWithRecorder()
         engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
 
-        let task = makeDummyTask()
+        guard let task = engine.task else { return XCTFail("engine should hold a task after start") }
         let realError = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut, userInfo: nil)
         engine.urlSession(URLSession(), task: task, didCompleteWithError: realError)
 
@@ -182,5 +176,36 @@ class ErrorReportingTests: XCTestCase {
         } else {
             XCTFail("expected .error, got \(events[0])")
         }
+    }
+
+    // A cancellation the client did not request (the shape a rejected certificate-pinning
+    // challenge arrives as) is a failure, not a user stop: it maps to .error.
+    func testDidCompleteUnrequestedCancellationMapsToError() {
+        let (engine, recorder) = makeEngineWithRecorder()
+        engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
+
+        guard let task = engine.task else { return XCTFail("engine should hold a task after start") }
+        let cancelError = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled, userInfo: nil)
+        engine.urlSession(URLSession(), task: task, didCompleteWithError: cancelError)
+
+        let events = recorder.recorded
+        XCTAssertEqual(events.count, 1)
+        if case .error = events[0] {} else {
+            XCTFail("expected .error for an unrequested cancellation, got \(events[0])")
+        }
+    }
+
+    // A stale completion from a task replaced by a newer start() must be dropped silently.
+    func testStaleTaskCompletionIsDropped() {
+        let (engine, recorder) = makeEngineWithRecorder()
+        engine.start(request: URLRequest(url: URL(string: "ws://localhost:1")!))
+        let oldTask = engine.task
+
+        engine.start(request: URLRequest(url: URL(string: "ws://localhost:2")!))
+        XCTAssertNotNil(oldTask)
+        let staleError = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled, userInfo: nil)
+        engine.urlSession(URLSession(), task: oldTask!, didCompleteWithError: staleError)
+
+        XCTAssertEqual(recorder.recorded.count, 0, "stale task completion must not emit events")
     }
 }
